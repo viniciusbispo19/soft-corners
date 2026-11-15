@@ -10,17 +10,49 @@ import {SoftCornersEffect} from './effect.js';
 
 const EFFECT_NAME = 'soft-corners';
 
-// Real application windows. Menus, tooltips, popups, docks, the desktop,
-// notifications, DND icons and override-redirect windows are ignored.
-const ROUNDED_TYPES = new Set([
-    Meta.WindowType.NORMAL,
+const NORMAL_TYPES = new Set([Meta.WindowType.NORMAL]);
+// Dialog-like windows, rounded unless "round-dialogs" is off. Menus,
+// tooltips, popups, docks, the desktop, notifications, DND icons and
+// override-redirect windows are always ignored.
+const DIALOG_TYPES = new Set([
     Meta.WindowType.DIALOG,
     Meta.WindowType.MODAL_DIALOG,
     Meta.WindowType.UTILITY,
 ]);
 
+// Keys that only change how the corners look (sent to the shader).
+const STYLE_KEYS = [
+    'corner-radius', 'corner-smoothing', 'round-top-left', 'round-top-right',
+    'round-bottom-left', 'round-bottom-right', 'round-shadow',
+    'border-width', 'border-color',
+];
+// Keys that change which windows get the effect.
+const RULE_KEYS = ['round-maximized', 'round-tiled', 'round-dialogs', 'excluded-apps'];
+
 function normalizeId(id) {
     return id.trim().toLowerCase().replace(/\.desktop$/, '');
+}
+
+// Parses "rgba(r,g,b,a)", "rgb(r,g,b)" (as written by Gdk.RGBA.to_string)
+// and "#rrggbb[aa]" into straight RGBA in 0…1.
+function parseColor(text) {
+    const fallback = [1, 1, 1, 0.15];
+    const s = text.trim().toLowerCase();
+    let m = s.match(/^rgba?\(([^)]*)\)$/);
+    if (m) {
+        const parts = m[1].split(',').map(v => parseFloat(v));
+        if (parts.length < 3 || parts.some(Number.isNaN))
+            return fallback;
+        const [r, g, b, a = 1] = parts;
+        return [r / 255, g / 255, b / 255, Math.min(1, Math.max(0, a))];
+    }
+    m = s.match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/);
+    if (m) {
+        const n = parseInt(m[1], 16);
+        const a = m[2] ? parseInt(m[2], 16) / 255 : 1;
+        return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255, a];
+    }
+    return fallback;
 }
 
 export default class SoftCornersExtension extends Extension {
@@ -30,22 +62,21 @@ export default class SoftCornersExtension extends Extension {
         this._pendingSources = new Set();
 
         this._settings = this.getSettings();
-        this._radius = this._settings.get_int('corner-radius');
+        this._style = this._readStyle();
         this._excluded = this._readExcluded();
-        this._settingsIds = [
-            this._settings.connect('changed::corner-radius', () => {
-                this._radius = this._settings.get_int('corner-radius');
+        this._settingsId = this._settings.connect('changed', (_s, key) => {
+            if (STYLE_KEYS.includes(key)) {
+                this._style = this._readStyle();
                 for (const record of this._tracked.values()) {
                     if (record.effect)
-                        record.effect.radius = this._radius;
+                        record.effect.style = this._style;
                 }
-            }),
-            this._settings.connect('changed::excluded-apps', () => {
+            } else if (RULE_KEYS.includes(key)) {
                 this._excluded = this._readExcluded();
                 for (const actor of this._tracked.keys())
                     this._sync(actor);
-            }),
-        ];
+            }
+        });
 
         this._windowCreatedId = global.display.connect('window-created',
             (_display, window) => this._onWindowCreated(window));
@@ -55,10 +86,10 @@ export default class SoftCornersExtension extends Extension {
     }
 
     disable() {
-        for (const id of this._settingsIds)
-            this._settings.disconnect(id);
-        this._settingsIds = null;
+        this._settings.disconnect(this._settingsId);
+        this._settingsId = 0;
         this._settings = null;
+        this._style = null;
         this._excluded = null;
 
         global.display.disconnect(this._windowCreatedId);
@@ -129,17 +160,36 @@ export default class SoftCornersExtension extends Extension {
     }
 
     _shouldRound(window) {
-        if (window.is_override_redirect())
+        if (window.is_override_redirect() || window.is_fullscreen())
             return false;
-        if (!ROUNDED_TYPES.has(window.get_window_type()))
+
+        const type = window.get_window_type();
+        if (!NORMAL_TYPES.has(type) &&
+            !(DIALOG_TYPES.has(type) && this._settings.get_boolean('round-dialogs')))
             return false;
-        if (window.is_fullscreen())
+
+        const flags = window.get_maximize_flags();
+        if (flags === Meta.MaximizeFlags.BOTH && !this._settings.get_boolean('round-maximized'))
             return false;
-        if (window.get_maximize_flags() === Meta.MaximizeFlags.BOTH)
+        // Half-screen tiling maximizes in one direction only.
+        if (flags !== Meta.MaximizeFlags.NONE && flags !== Meta.MaximizeFlags.BOTH &&
+            !this._settings.get_boolean('round-tiled'))
             return false;
-        if (this._isExcluded(window))
-            return false;
-        return true;
+
+        return !this._isExcluded(window);
+    }
+
+    _readStyle() {
+        const s = this._settings;
+        return {
+            radius: s.get_int('corner-radius'),
+            smoothing: s.get_double('corner-smoothing'),
+            corners: ['round-top-left', 'round-top-right', 'round-bottom-left', 'round-bottom-right']
+                .map(key => s.get_boolean(key) ? 1 : 0),
+            roundShadow: s.get_boolean('round-shadow'),
+            borderWidth: s.get_int('border-width'),
+            borderColor: parseColor(s.get_string('border-color')),
+        };
     }
 
     _readExcluded() {
@@ -179,7 +229,7 @@ export default class SoftCornersExtension extends Extension {
     _addEffect(actor, record) {
         if (record.effect)
             return;
-        record.effect = new SoftCornersEffect(this._radius);
+        record.effect = new SoftCornersEffect(this._style);
         record.reordering = true;
         actor.add_effect_with_name(EFFECT_NAME, record.effect);
         record.reordering = false;

@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // SoftCornersEffect: a single Clutter.ShaderEffect applied directly to a
-// Meta.WindowActor. It clips the window frame's corners with a rounded
-// rectangle and nothing else: no extra actors, no cached geometry.
+// Meta.WindowActor. Everything happens in one fragment shader: clipping the
+// corners, reshaping the native shadow around them and an optional border.
+// No extra actors, no cached geometry.
 //
 // How the coordinates work (Mutter 51, clutter-offscreen-effect.c):
 //  * The OffscreenEffect renders the actor into an FBO that covers the
 //    actor's paint volume (actor-local coordinates), quantized by
 //    _clutter_actor_box_enlarge_for_effects(). If the paint volume is
-//    unknown (e.g. the wobbly DeformEffect is on the actor and returns
-//    FALSE from modify_paint_volume) it covers the allocation box instead.
+//    unknown it covers the allocation box instead.
 //  * The texture is then drawn at fbo_offset, scaled by 1/resource_scale.
 // Every frame, in vfunc_paint_target(), we recompute where the window frame
 // sits inside that texture and upload it as uniforms. Nothing is cached, so
@@ -20,9 +20,14 @@ import Cogl from 'gi://Cogl';
 import GObject from 'gi://GObject';
 
 const DECLARATIONS = `
-uniform vec4 sc_bounds;    // frame rect inside the FBO, in texture pixels (x1, y1, x2, y2)
-uniform vec2 sc_tex_size;  // FBO texture size in pixels
-uniform float sc_radius;   // corner radius in texture pixels (0 = passthrough)
+uniform vec4 sc_bounds;        // frame rect inside the FBO, in texture px (x1, y1, x2, y2)
+uniform vec2 sc_tex_size;      // FBO texture size in px
+uniform float sc_radius;       // corner radius in texture px (0 = square corners)
+uniform vec4 sc_corners;       // 1 = round this corner: top-left, top-right, bottom-left, bottom-right
+uniform float sc_exponent;     // 2 = circular arc, > 2 = squircle (superellipse)
+uniform float sc_round_shadow; // 1 = reshape the native shadow around rounded corners
+uniform float sc_border_width; // border width in texture px (0 = none)
+uniform vec4 sc_border_color;  // straight (non-premultiplied) RGBA
 
 // Sample the FBO at a pixel position; anything outside the texture is
 // transparent (no clamp-to-edge smearing of window content).
@@ -31,38 +36,76 @@ vec4 sc_sample(vec2 px) {
         return vec4(0.0);
     return texture2D(cogl_sampler0, px / sc_tex_size);
 }
+
+float sc_corner_enabled(vec2 dir) {
+    if (dir.y < 0.0)
+        return dir.x < 0.0 ? sc_corners.x : sc_corners.y;
+    return dir.x < 0.0 ? sc_corners.z : sc_corners.w;
+}
+
+// Distance from the corner circle's centre, for q >= 0. A p-norm with p > 2
+// gives the smoother "squircle" corner.
+float sc_norm(vec2 q) {
+    if (sc_exponent <= 2.001)
+        return length(q);
+    vec2 a = pow(max(q, vec2(0.0)), vec2(sc_exponent));
+    return pow(a.x + a.y, 1.0 / sc_exponent);
+}
 `;
 
 // Runs after Cogl's default fragment code, so cogl_color_out already holds
-// texel * paint opacity (premultiplied). Only pixels that are inside the
-// frame rect AND inside one of the four corner squares are touched; the
-// native shadow outside the frame is never modified.
+// texel * paint opacity (premultiplied).
+//
+// Only the four corner quadrants are touched (beyond the centres of the
+// corner arcs). There:
+//  * inside the arc: the window content, untouched;
+//  * outside the arc: a "rounded" version of the window's own shadow. The
+//    native shadow (Mutter's for X11 windows, the client's for CSD windows)
+//    follows the rectangular window, so its corners stick out as a square
+//    of "glass". We rebuild it from the native shadow along the two straight
+//    edges, sampled at the same distance from the rounded edge, so it keeps
+//    the native colour, softness and offset but follows the curve.
 const FRAGMENT = `
-if (sc_radius > 0.0) {
+if (sc_radius > 0.0 || sc_border_width > 0.0) {
     vec2 px = cogl_tex_coord0_in.st * sc_tex_size;
     vec2 center = (sc_bounds.xy + sc_bounds.zw) * 0.5;
     vec2 half_size = (sc_bounds.zw - sc_bounds.xy) * 0.5;
     vec2 rel = px - center;
-    vec2 q = abs(rel) - (half_size - vec2(sc_radius));
+    vec2 dir = vec2(rel.x < 0.0 ? -1.0 : 1.0, rel.y < 0.0 ? -1.0 : 1.0);
+    vec2 a = abs(rel);
+    bool inside = a.x <= half_size.x && a.y <= half_size.y;
+    float r = sc_radius * sc_corner_enabled(dir);
+    vec2 q = a - (half_size - vec2(r));
 
-    if (q.x > 0.0 && q.y > 0.0 &&
-        abs(rel.x) <= half_size.x && abs(rel.y) <= half_size.y) {
-        float dist = length(q) - sc_radius;
-        float coverage = clamp(0.5 - dist, 0.0, 1.0);
+    if (r > 0.0 && q.x > 0.0 && q.y > 0.0) {
+        float dist = sc_norm(q) - r;
 
-        if (coverage < 1.0) {
-            // What should show through the clipped corner is the window's
-            // own (native) shadow. Estimate it by sampling the shadow just
-            // outside the two frame edges that meet at this corner.
-            vec2 dir = sign(rel);
-            vec2 corner = center + dir * half_size;
-            float off = max(dist, 0.0) + 1.0;
-            vec4 sx = sc_sample(vec2(corner.x + dir.x * off, px.y));
-            vec4 sy = sc_sample(vec2(px.x, corner.y + dir.y * off));
-            vec4 shadow = (sx.a > sy.a ? sx : sy) * cogl_color_in;
+        if (dist > -0.5 && (inside || sc_round_shadow > 0.5)) {
+            float d = max(dist, 0.0);
+            vec2 edge = center + dir * half_size;
+            vec2 arc_center = center + dir * (half_size - vec2(r));
+            // Native shadow on the vertical edge (beside the corner) and on
+            // the horizontal edge (above/below it), at distance d.
+            vec4 side = sc_sample(vec2(edge.x + dir.x * d, arc_center.y));
+            vec4 cap = sc_sample(vec2(arc_center.x, edge.y + dir.y * d));
+            vec2 u = normalize(q);
+            vec4 shadow = mix(cap, side, u.x * u.x) * cogl_color_in;
 
+            float coverage = clamp(0.5 - dist, 0.0, 1.0);
             cogl_color_out = mix(shadow, cogl_color_out, coverage);
         }
+    }
+
+    if (sc_border_width > 0.0 && inside) {
+        // Signed distance to the (rounded) frame edge: negative inside.
+        vec2 qq = a - (half_size - vec2(r));
+        float sd = (qq.x > 0.0 && qq.y > 0.0) ? sc_norm(qq) - r
+                                               : max(qq.x, qq.y) - r;
+        float ring = clamp(sd + sc_border_width + 0.5, 0.0, 1.0) *
+                     clamp(0.5 - sd, 0.0, 1.0);
+        float alpha = sc_border_color.a * ring * cogl_color_in.a;
+        vec4 border = vec4(sc_border_color.rgb * alpha, alpha);
+        cogl_color_out = border + cogl_color_out * (1.0 - alpha);
     }
 }
 `;
@@ -107,20 +150,27 @@ function fboOrigin(actor) {
     return [Math.trunc(x1 - rawX), Math.trunc(y1 - rawY)];
 }
 
+/**
+ * @typedef {object} CornerStyle
+ * @property {number} radius - logical px
+ * @property {number[]} corners - [tl, tr, bl, br], 1 = rounded
+ * @property {number} smoothing - 0 (circle) … 1 (strong squircle)
+ * @property {boolean} roundShadow
+ * @property {number} borderWidth - logical px
+ * @property {number[]} borderColor - straight RGBA, 0…1
+ */
+
 export const SoftCornersEffect = GObject.registerClass(
 class SoftCornersEffect extends Clutter.ShaderEffect {
-    _init(radius) {
+    _init(style) {
         super._init();
-        this._radius = radius;
+        this._style = style;
     }
 
-    set radius(value) {
-        this._radius = value;
+    /** @param {CornerStyle} style */
+    set style(style) {
+        this._style = style;
         this.get_actor()?.queue_redraw();
-    }
-
-    get radius() {
-        return this._radius;
     }
 
     // Called once per class by ClutterShaderEffect; shared by all instances.
@@ -147,13 +197,15 @@ class SoftCornersEffect extends Clutter.ShaderEffect {
 
     _passthrough() {
         this.set_uniform_float('sc_radius', 1, [0]);
+        this.set_uniform_float('sc_border_width', 1, [0]);
     }
 
     _updateUniforms() {
         const actor = this.get_actor();
         const window = actor?.get_meta_window?.();
         const texture = this.get_texture();
-        if (!window || !texture) {
+        const style = this._style;
+        if (!window || !texture || (style.radius <= 0 && style.borderWidth <= 0)) {
             this._passthrough();
             return;
         }
@@ -182,7 +234,7 @@ class SoftCornersEffect extends Clutter.ShaderEffect {
             return;
         }
 
-        const radius = Math.min(this._radius, frameW / 2, frameH / 2) * scale;
+        const radius = Math.min(style.radius, frameW / 2, frameH / 2) * scale;
 
         this.set_uniform_float('sc_bounds', 4, [
             (left - offX) * scale,
@@ -192,5 +244,10 @@ class SoftCornersEffect extends Clutter.ShaderEffect {
         ]);
         this.set_uniform_float('sc_tex_size', 2, [texW, texH]);
         this.set_uniform_float('sc_radius', 1, [radius]);
+        this.set_uniform_float('sc_corners', 4, style.corners);
+        this.set_uniform_float('sc_exponent', 1, [2 + 3 * style.smoothing]);
+        this.set_uniform_float('sc_round_shadow', 1, [style.roundShadow ? 1 : 0]);
+        this.set_uniform_float('sc_border_width', 1, [style.borderWidth * scale]);
+        this.set_uniform_float('sc_border_color', 4, style.borderColor);
     }
 });

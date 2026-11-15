@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Adw from 'gi://Adw';
+import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
 
@@ -8,31 +9,167 @@ import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/ex
 
 const normalizeId = id => id.trim().replace(/\.desktop$/, '');
 
+const CORNERS = [
+    ['round-top-left', 'Superior esquerdo'],
+    ['round-top-right', 'Superior direito'],
+    ['round-bottom-left', 'Inferior esquerdo'],
+    ['round-bottom-right', 'Inferior direito'],
+];
+
+function switchRow(settings, key, title, subtitle = '') {
+    const row = new Adw.SwitchRow({title, subtitle});
+    settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
+    return row;
+}
+
 export default class SoftCornersPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
         // Keep the settings object alive as long as the window.
         window._settings = settings;
+        window.set_default_size(640, 760);
 
+        window.add(this._appearancePage(settings, window));
+        window.add(this._windowsPage(settings, window));
+    }
+
+    // --- Page 1: how the corners look --------------------------------------
+    _appearancePage(settings, window) {
         const page = new Adw.PreferencesPage({
-            title: 'Soft Corners',
+            title: 'Aparência',
             icon_name: 'preferences-desktop-appearance-symbolic',
         });
-        window.add(page);
 
-        // --- Appearance ---------------------------------------------------
-        const appearance = new Adw.PreferencesGroup({title: 'Aparência'});
-        page.add(appearance);
+        // Corners
+        const corners = new Adw.PreferencesGroup({
+            title: 'Cantos',
+            description: 'As mudanças aparecem na hora em todas as janelas.',
+        });
+        page.add(corners);
 
         const radiusRow = Adw.SpinRow.new_with_range(0, 48, 1);
         radiusRow.set({
-            title: 'Raio dos cantos',
-            subtitle: 'Em pixels. 0 desativa o arredondamento. Padrão: 12',
+            title: 'Raio',
+            subtitle: 'Em pixels. 0 deixa os cantos retos. Padrão: 12',
         });
         settings.bind('corner-radius', radiusRow, 'value', Gio.SettingsBindFlags.DEFAULT);
-        appearance.add(radiusRow);
+        corners.add(radiusRow);
 
-        // --- Exceptions ---------------------------------------------------
+        const smoothRow = new Adw.ActionRow({
+            title: 'Suavidade',
+            subtitle: 'Da curva circular (esquerda) ao "squircle", mais suave, ' +
+                'como os ícones do macOS (direita)',
+        });
+        const smoothScale = new Gtk.Scale({
+            adjustment: new Gtk.Adjustment({lower: 0, upper: 1, step_increment: 0.05}),
+            draw_value: false,
+            hexpand: true,
+            width_request: 200,
+            valign: Gtk.Align.CENTER,
+        });
+        smoothScale.add_mark(0, Gtk.PositionType.BOTTOM, null);
+        smoothScale.add_mark(1, Gtk.PositionType.BOTTOM, null);
+        settings.bind('corner-smoothing', smoothScale.adjustment, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
+        smoothRow.add_suffix(smoothScale);
+        corners.add(smoothRow);
+
+        const whichRow = new Adw.ExpanderRow({
+            title: 'Quais cantos arredondar',
+            subtitle: 'Por exemplo, só os de cima',
+        });
+        for (const [key, title] of CORNERS)
+            whichRow.add_row(switchRow(settings, key, title));
+        corners.add(whichRow);
+
+        // Shadow
+        const shadow = new Adw.PreferencesGroup({title: 'Sombra'});
+        page.add(shadow);
+        shadow.add(switchRow(settings, 'round-shadow', 'Arredondar a sombra',
+            'A sombra nativa da janela acompanha a curva dos cantos. Desligado, ' +
+            'ela mantém as pontas retas.'));
+
+        // Border
+        const border = new Adw.PreferencesGroup({
+            title: 'Borda',
+            description: 'Um contorno fino ao longo da borda arredondada, desenhado ' +
+                'no mesmo shader (sem atores extras).',
+        });
+        page.add(border);
+
+        const widthRow = Adw.SpinRow.new_with_range(0, 6, 1);
+        widthRow.set({title: 'Espessura', subtitle: 'Em pixels. 0 desliga a borda.'});
+        settings.bind('border-width', widthRow, 'value', Gio.SettingsBindFlags.DEFAULT);
+        border.add(widthRow);
+
+        const colorRow = new Adw.ActionRow({title: 'Cor'});
+        const colorButton = new Gtk.ColorDialogButton({
+            dialog: new Gtk.ColorDialog({with_alpha: true}),
+            valign: Gtk.Align.CENTER,
+        });
+        const loadColor = () => {
+            const rgba = new Gdk.RGBA();
+            if (rgba.parse(settings.get_string('border-color')))
+                colorButton.set_rgba(rgba);
+        };
+        loadColor();
+        colorButton.connect('notify::rgba', () => {
+            const text = colorButton.get_rgba().to_string();
+            if (text !== settings.get_string('border-color'))
+                settings.set_string('border-color', text);
+        });
+        const colorId = settings.connect('changed::border-color', loadColor);
+        window.connect('close-request', () => {
+            settings.disconnect(colorId);
+            return false;
+        });
+        colorRow.add_suffix(colorButton);
+        colorRow.set_activatable_widget(colorButton);
+        border.add(colorRow);
+        // The color only matters when there is a border.
+        const syncColorSensitive = () => colorRow.set_sensitive(widthRow.get_value() > 0);
+        widthRow.connect('notify::value', syncColorSensitive);
+        syncColorSensitive();
+
+        // Reset
+        const resetGroup = new Adw.PreferencesGroup();
+        page.add(resetGroup);
+        const resetRow = new Adw.ButtonRow({title: 'Restaurar aparência padrão'});
+        resetRow.connect('activated', () => {
+            for (const key of ['corner-radius', 'corner-smoothing', 'round-shadow',
+                'border-width', 'border-color', ...CORNERS.map(([k]) => k)])
+                settings.reset(key);
+        });
+        resetGroup.add(resetRow);
+
+        return page;
+    }
+
+    // --- Page 2: which windows are rounded ---------------------------------
+    _windowsPage(settings, window) {
+        const page = new Adw.PreferencesPage({
+            title: 'Janelas',
+            icon_name: 'focus-windows-symbolic',
+        });
+
+        const rules = new Adw.PreferencesGroup({
+            title: 'Quando arredondar',
+            description: 'Janelas em tela cheia nunca são arredondadas. Menus, ' +
+                'dicas e popups são sempre ignorados.',
+        });
+        page.add(rules);
+        rules.add(switchRow(settings, 'round-maximized', 'Janelas maximizadas',
+            'Mantém os cantos arredondados mesmo com a janela maximizada'));
+        rules.add(switchRow(settings, 'round-tiled', 'Janelas lado a lado',
+            'Janelas encaixadas em metade da tela'));
+        rules.add(switchRow(settings, 'round-dialogs', 'Diálogos e janelas auxiliares',
+            'Caixas de diálogo e janelas de ferramentas, além das janelas normais'));
+
+        this._exceptionsGroup(settings, window, page);
+        return page;
+    }
+
+    _exceptionsGroup(settings, window, page) {
         const exceptions = new Adw.PreferencesGroup({
             title: 'Exceções',
             description: 'Janelas destes aplicativos nunca são arredondadas. ' +
