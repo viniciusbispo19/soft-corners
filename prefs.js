@@ -50,15 +50,16 @@ export default class SoftCornersPreferences extends ExtensionPreferences {
         const radiusRow = Adw.SpinRow.new_with_range(0, 48, 1);
         radiusRow.set({
             title: 'Raio',
-            subtitle: 'Em pixels. 0 deixa os cantos retos. Padrão: 12',
+            subtitle: 'Em pixels lógicos: o mesmo tamanho em qualquer escala de tela. ' +
+                'Padrão: 10, como nas janelas do macOS',
         });
         settings.bind('corner-radius', radiusRow, 'value', Gio.SettingsBindFlags.DEFAULT);
         corners.add(radiusRow);
 
         const smoothRow = new Adw.ActionRow({
-            title: 'Suavidade',
-            subtitle: 'Da curva circular (esquerda) ao "squircle", mais suave, ' +
-                'como os ícones do macOS (direita)',
+            title: 'Cantos contínuos',
+            subtitle: 'Da curva de círculo (esquerda) aos cantos contínuos do ' +
+                'macOS (direita, padrão). O tamanho do canto não muda, só a suavidade.',
         });
         const smoothScale = new Gtk.Scale({
             adjustment: new Gtk.Adjustment({lower: 0, upper: 1, step_increment: 0.05}),

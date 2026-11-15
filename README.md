@@ -11,11 +11,15 @@
 - **Maximized and fullscreen windows** keep square corners. The rounding comes back when they leave those states.
 - Rounds normal windows and dialogs. Menus, tooltips, popups, docks and the desktop are ignored.
 
+## macOS-style corners
+
+By default the corners match macOS windows: a 10 px radius with *continuous* corners. A circular corner jumps from straight to curved; macOS corners ease into the curve. For a radius r, the macOS curve starts 1.53·r from the corner. Soft Corners draws a superellipse fitted to that curve (exponent 3.26, extent 1.53·r). It is within 0.1 px of the macOS shape at 10 px, against 0.22 px for a circular arc.
+
 ## Settings
 
 **Appearance**
-- Corner radius (0–48 px, default 12)
-- Smoothing, from a circular arc to a smoother squircle
+- Corner radius (0–48 px, default 10, like macOS windows before Tahoe), in logical pixels so it looks the same size at any monitor scale
+- Continuous corners, from a circular arc to macOS-style continuous corners (the default)
 - Which corners to round (for example, only the top ones)
 - Rounded shadow, on or off
 - Border along the rounded edge, with width and color (drawn in the same shader)

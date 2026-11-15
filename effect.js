@@ -22,9 +22,9 @@ import GObject from 'gi://GObject';
 const DECLARATIONS = `
 uniform vec4 sc_bounds;        // frame rect inside the FBO, in texture px (x1, y1, x2, y2)
 uniform vec2 sc_tex_size;      // FBO texture size in px
-uniform float sc_radius;       // corner radius in texture px (0 = square corners)
+uniform float sc_radius;       // corner extent in texture px: where the curve starts (0 = square)
 uniform vec4 sc_corners;       // 1 = round this corner: top-left, top-right, bottom-left, bottom-right
-uniform float sc_exponent;     // 2 = circular arc, > 2 = squircle (superellipse)
+uniform float sc_exponent;     // 2 = circular arc, ~3.26 = macOS continuous corner
 uniform float sc_round_shadow; // 1 = reshape the native shadow around rounded corners
 uniform float sc_border_width; // border width in texture px (0 = none)
 uniform vec4 sc_border_color;  // straight (non-premultiplied) RGBA
@@ -43,8 +43,9 @@ float sc_corner_enabled(vec2 dir) {
     return dir.x < 0.0 ? sc_corners.z : sc_corners.w;
 }
 
-// Distance from the corner circle's centre, for q >= 0. A p-norm with p > 2
-// gives the smoother "squircle" corner.
+// Distance from the corner's centre, for q >= 0. p = 2 is a circle; p > 2 is
+// a superellipse, whose curvature fades to zero where it meets the straight
+// edges (a "continuous" corner, like macOS windows).
 float sc_norm(vec2 q) {
     if (sc_exponent <= 2.001)
         return length(q);
@@ -150,11 +151,35 @@ function fboOrigin(actor) {
     return [Math.trunc(x1 - rawX), Math.trunc(y1 - rawY)];
 }
 
+// macOS continuous corners (UIBezierPath / NSBezierPath "continuous" corner
+// curve): for a corner radius r, the curve starts 1.52866483·r from the
+// corner instead of r, and its 45° point sits where a circular corner of
+// radius r would put it.
+const APPLE_EXTENT = 1.52866483;
+const CIRCLE_INSET_45 = 1 - Math.SQRT1_2;   // 45° inset of a circular corner, ×r
+
+/**
+ * Corner shape for a radius r (any unit) and a smoothing s in [0, 1]:
+ * s = 0 is a circular arc; s = 1 is a superellipse fitted to the macOS
+ * continuous corner (max deviation 0.0091·r, i.e. under 0.1 px at r = 10).
+ * Every s keeps the 45° point of the circle, so the corner looks the same
+ * size and only the curvature changes.
+ *
+ * @returns {{extent: number, exponent: number}}
+ */
+export function cornerShape(r, s) {
+    const k = 1 + (APPLE_EXTENT - 1) * Math.min(1, Math.max(0, s));
+    // Superellipse of half-size k·r through the circle's 45° point:
+    // k·(1 − 2^(−1/n)) = 1 − 1/√2   ⇒   n = ln 2 / −ln(1 − (1 − 1/√2)/k)
+    const exponent = Math.LN2 / -Math.log(1 - CIRCLE_INSET_45 / k);
+    return {extent: k * r, exponent};
+}
+
 /**
  * @typedef {object} CornerStyle
- * @property {number} radius - logical px
+ * @property {number} radius - logical px (the macOS-style corner radius)
  * @property {number[]} corners - [tl, tr, bl, br], 1 = rounded
- * @property {number} smoothing - 0 (circle) … 1 (strong squircle)
+ * @property {number} smoothing - 0 (circular arc) … 1 (macOS continuous corner)
  * @property {boolean} roundShadow
  * @property {number} borderWidth - logical px
  * @property {number[]} borderColor - straight RGBA, 0…1
@@ -212,7 +237,11 @@ class SoftCornersEffect extends Clutter.ShaderEffect {
 
         const texW = texture.get_width();
         const texH = texture.get_height();
-        // The FBO is rendered at the ceiled resource scale.
+        // Logical px -> FBO px. The OffscreenEffect renders the FBO at the
+        // ceiled resource scale and draws it back divided by that same value
+        // (clutter_actor_get_resource_scale() is already ceilf()), so a radius
+        // in logical px looks the same size on any monitor: 10 px at scale 1,
+        // 20 device px at scale 2, and the right size at fractional scales.
         const scale = Math.ceil(actor.get_resource_scale());
         const [offX, offY] = fboOrigin(actor);
 
@@ -234,7 +263,10 @@ class SoftCornersEffect extends Clutter.ShaderEffect {
             return;
         }
 
-        const radius = Math.min(style.radius, frameW / 2, frameH / 2) * scale;
+        // The curve may not run past the middle of a side.
+        const shape = cornerShape(style.radius, style.smoothing);
+        const fit = Math.min(1, frameW / 2 / shape.extent, frameH / 2 / shape.extent);
+        const extent = shape.extent * fit * scale;
 
         this.set_uniform_float('sc_bounds', 4, [
             (left - offX) * scale,
@@ -243,9 +275,9 @@ class SoftCornersEffect extends Clutter.ShaderEffect {
             (bottom - offY) * scale,
         ]);
         this.set_uniform_float('sc_tex_size', 2, [texW, texH]);
-        this.set_uniform_float('sc_radius', 1, [radius]);
+        this.set_uniform_float('sc_radius', 1, [extent]);
         this.set_uniform_float('sc_corners', 4, style.corners);
-        this.set_uniform_float('sc_exponent', 1, [2 + 3 * style.smoothing]);
+        this.set_uniform_float('sc_exponent', 1, [shape.exponent]);
         this.set_uniform_float('sc_round_shadow', 1, [style.roundShadow ? 1 : 0]);
         this.set_uniform_float('sc_border_width', 1, [style.borderWidth * scale]);
         this.set_uniform_float('sc_border_color', 4, style.borderColor);

@@ -5,15 +5,15 @@
     <!-- Appearance -->
     <key name="corner-radius" type="i">
       <range min="0" max="48"/>
-      <default>12</default>
+      <default>10</default>
       <summary>Corner radius</summary>
-      <description>Radius of the rounded window corners, in logical pixels.</description>
+      <description>Radius of the rounded window corners, in logical pixels, so it looks the same size at any monitor scale. 10 matches macOS windows before macOS Tahoe.</description>
     </key>
     <key name="corner-smoothing" type="d">
       <range min="0" max="1"/>
-      <default>0</default>
+      <default>1</default>
       <summary>Corner smoothing</summary>
-      <description>0 draws a circular arc; higher values draw a smoother squircle (superellipse) corner.</description>
+      <description>0 draws a circular arc; 1 draws macOS-style continuous corners (a superellipse fitted to the macOS curve). Every value keeps the same apparent corner size.</description>
     </key>
     <key name="round-top-left" type="b">
       <default>true</default>
