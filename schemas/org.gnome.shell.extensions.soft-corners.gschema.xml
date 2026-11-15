@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.soft-corners"
+          path="/org/gnome/shell/extensions/soft-corners/">
+    <key name="corner-radius" type="i">
+      <range min="0" max="48"/>
+      <default>12</default>
+      <summary>Corner radius</summary>
+      <description>Radius of the rounded window corners, in logical pixels.</description>
+    </key>
+    <key name="excluded-apps" type="as">
+      <default>[]</default>
+      <summary>Excluded applications</summary>
+      <description>WM_CLASS or application IDs (e.g. org.gnome.Calculator) whose windows are never rounded.</description>
+    </key>
+  </schema>
+</schemalist>

@@ -1,0 +1,11 @@
+{
+  "uuid": "soft-corners@viniciusbispo19",
+  "name": "Soft Corners",
+  "description": "Rounds the corners of every window with a single GLSL shader effect applied directly to the window actor. No extra actors, keeps Mutter's native shadow and plays well with wobbly windows.",
+  "shell-version": [
+    "51"
+  ],
+  "url": "https://github.com/viniciusbispo19/soft-corners",
+  "version-name": "0.1.0",
+  "settings-schema": "org.gnome.shell.extensions.soft-corners"
+}
