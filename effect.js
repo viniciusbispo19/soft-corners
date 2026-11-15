@@ -129,12 +129,24 @@ class SoftCornersEffect extends Clutter.ShaderEffect {
     }
 
     vfunc_paint_target(node, paintContext) {
-        this._updateUniforms();
+        // Never let an error here skip the chain-up: that would leave the
+        // window unpainted (invisible). Fall back to an unclipped window.
+        try {
+            this._updateUniforms();
+        } catch (e) {
+            if (!this._errorLogged) {
+                this._errorLogged = true;
+                logError(e, 'Soft Corners: failed to update shader uniforms');
+            }
+            try {
+                this._passthrough();
+            } catch {}
+        }
         super.vfunc_paint_target(node, paintContext);
     }
 
     _passthrough() {
-        this.set_uniform_float('sc_radius', 1, 1, [0]);
+        this.set_uniform_float('sc_radius', 1, [0]);
     }
 
     _updateUniforms() {
@@ -172,13 +184,13 @@ class SoftCornersEffect extends Clutter.ShaderEffect {
 
         const radius = Math.min(this._radius, frameW / 2, frameH / 2) * scale;
 
-        this.set_uniform_float('sc_bounds', 4, 4, [
+        this.set_uniform_float('sc_bounds', 4, [
             (left - offX) * scale,
             (top - offY) * scale,
             (right - offX) * scale,
             (bottom - offY) * scale,
         ]);
-        this.set_uniform_float('sc_tex_size', 2, 2, [texW, texH]);
-        this.set_uniform_float('sc_radius', 1, 1, [radius]);
+        this.set_uniform_float('sc_tex_size', 2, [texW, texH]);
+        this.set_uniform_float('sc_radius', 1, [radius]);
     }
 });
